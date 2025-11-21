@@ -1,116 +1,87 @@
 # Expense Tracker App
 
-A cross-platform mobile application built with React Native, Expo, and TypeScript for tracking personal expenses with a clean and intuitive interface.
-
-## Features
-
-- Add, edit, and delete expenses
-- Categorize expenses
-- View expense history
-- Responsive design for both iOS and Android
-- Offline support with local data persistence
+A full-stack expense tracking application with React Native mobile app and Node.js backend.
 
 ## Prerequisites
 
-- Node.js (v16 or later)
+- Node.js (v18 or later)
 - npm or yarn
-- Expo CLI (`npm install -g expo-cli`)
-- Android Studio / Xcode (for emulator/simulator) or Expo Go app (for physical device)
+- Expo Go app (for mobile testing)
 
-## Getting Started
+## Quick Start
 
-### 1. Clone the repository
+### 1. Clone and Setup
 
 ```bash
+# Clone the repository
 git clone https://github.com/PrinceKex/expense-tracker-assessment.git
 cd expense-tracker-assessment
 ```
 
-### 2. Install Dependencies
+### 2. Backend Setup
 
 ```bash
-# Navigate to the mobile directory
-cd mobile
-
 # Install dependencies
+cd backend
 npm install
-# or
-yarn install
+
+# Set up environment
+cp .env.example .env
+# Edit .env with your database credentials
+
+# Run database migrations
+npx prisma migrate dev
+npx prisma generate
+
+# Start the backend server
+npm run dev
+# Server runs on http://localhost:3000
 ```
 
-### 3. Set Up Environment Variables
-
-Create a `.env` file in the `mobile` directory with the following variables:
-
-```env
-EXPO_PUBLIC_API_URL=your_api_url_here
-# Add any other environment variables needed
-```
-
-### 4. Start the Development Server
+### 3. Mobile App Setup
 
 ```bash
-# From the mobile directory
+# In a new terminal
+cd ../mobile
+npm install
+
+# Configure API URL (use your computer's IP if testing on a physical device)
+echo "EXPO_PUBLIC_API_URL=http://localhost:3000" > .env
+
+# Start the mobile app
 npx expo start
 ```
 
-This will start the Metro bundler and present you with options to run the app.
-
 ## Running the App
 
-### Using a Physical Device
+1. **Backend**: Should be running at `http://localhost:3000`
+2. **Mobile**:
+   - **Physical Device**: Scan QR code with Expo Go app
+   - **Android Emulator**: Press `a` in the terminal
+   - **iOS Simulator**: Press `i` in the terminal (macOS only)
 
-1. Install the Expo Go app on your iOS or Android device
-2. Scan the QR code shown in the terminal or in the Expo Dev Tools
-3. The app will load in the Expo Go app
+## Environment Variables
 
-### Using an Emulator/Simulator
-
-#### Android
-
-1. Make sure you have an Android emulator set up through Android Studio
-2. Press `a` in the terminal where Expo is running to open the app in the Android emulator
-
-#### iOS (macOS only)
-
-1. Make sure you have Xcode installed
-2. Press `i` in the terminal where Expo is running to open the app in the iOS Simulator
-
-## Available Scripts
-
-- `npm start` or `yarn start` - Starts the development server
-- `npm run android` - Run on Android device/emulator
-- `npm run ios` - Run on iOS simulator (macOS only)
-- `npm run web` - Run in a web browser
-- `npm test` - Run tests
-
-## Project Structure
-
+### Backend (`.env` in backend/)
 ```
-mobile/
-├── app/                  # Main application code
-│   ├── (app)/            # Authenticated app screens
-│   ├── (auth)/           # Authentication screens
-│   ├── _layout.tsx       # Root layout
-│   └── index.tsx         # Entry point
-├── assets/               # Images, fonts, etc.
-├── components/           # Reusable components
-├── constants/            # App constants
-├── contexts/             # React contexts
-├── hooks/                # Custom React hooks
+DATABASE_URL="file:./dev.db"
+JWT_SECRET=your_secure_secret
+```
+
+> **Note**: The app uses SQLite by default, so no separate database server is needed.
+
+### Mobile (`.env` in mobile/)
+```
+# Use your computer's IP address if testing on a physical device
+EXPO_PUBLIC_API_URL=http://localhost:3000
+```
+
+## Need Help?
+
+- Backend API docs: `http://localhost:3000/api-docs`
+- For issues, check the [issues page](https://github.com/PrinceKex/expense-tracker-assessment/issues)
 ├── services/             # API services
 ├── types/                # TypeScript type definitions
 └── utils/                # Utility functions
 ```
 
-## Contributing
-
-1. Fork the repository
-2. Create a new branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
