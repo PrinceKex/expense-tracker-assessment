@@ -1,0 +1,30 @@
+{
+  "program": {
+    "fileInfos": {
+      "./src/app.ts": {
+        "version": "",
+        "signature": "",
+        "affectsGlobalScope": true
+      },
+      "./src/config/index.ts": {
+        "version": "",
+        "signature": "",
+        "affectsGlobalScope": true
+      },
+      "./src/middleware/errorHandler.ts": {
+        "version": "",
+        "signature": "",
+        "affectsGlobalScope": true
+      },
+      "./src/utils/prisma.ts": {
+        "version": "",
+        "signature": "",
+        "affectsGlobalScope": true
+      }
+    },
+    "options": {
+      "configFilePath": "./tsconfig.json"
+    }
+  },
+  "version": ""
+}
