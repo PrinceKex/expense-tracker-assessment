@@ -56,11 +56,16 @@ export const createExpense = async (req: Request, res: Response) => {
 export const getExpenses = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const userId = req.user?.id;
-    const { startDate, endDate, category } = req.query;
+    const { startDate, endDate, category, page: pageParam, limit: limitParam } = req.query;
 
     if (!userId) {
       throw new AppError('User not authenticated', 401);
     }
+
+    // Parse pagination parameters
+    const page = parseInt(pageParam as string) || 1;
+    const limit = parseInt(limitParam as string) || 10;
+    const offset = (page - 1) * limit;
 
     // Build the where clause
     const where: any = { userId };
@@ -87,19 +92,32 @@ export const getExpenses = async (req: Request, res: Response, next: NextFunctio
       where.category = category;
     }
 
-    const expenses = await prisma.expense.findMany({
-      where,
-      orderBy: {
-        date: 'desc',
-      },
-    });
+    // Get paginated results and total count in parallel
+    const [expenses, total] = await Promise.all([
+      prisma.expense.findMany({
+        where,
+        orderBy: { date: 'desc' },
+        skip: offset,
+        take: limit,
+      }),
+      prisma.expense.count({ where })
+    ]);
+
+    const totalPages = Math.ceil(total / limit);
 
     res.status(200).json({
       status: 'success',
-      results: expenses.length,
       data: {
         expenses,
-      },
+        pagination: {
+          page,
+          limit,
+          total,
+          totalPages,
+          hasNextPage: page < totalPages,
+          hasPrevPage: page > 1
+        }
+      }
     });
   } catch (error) {
     next(error);

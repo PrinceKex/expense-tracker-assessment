@@ -4,36 +4,79 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useR
 import { api } from "../services/api";
 import { Expense } from "../types/expense";
 
+// Debounce utility function
+const debounce = <F extends (...args: any[]) => any>(
+  func: F,
+  wait: number
+) => {
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  
+  return function(this: ThisParameterType<F>, ...args: Parameters<F>) {
+    const context = this;
+    
+    return new Promise<ReturnType<F>>((resolve) => {
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+      
+      timeout = setTimeout(() => {
+        timeout = null;
+        resolve(func.apply(context, args));
+      }, wait);
+    });
+  };
+};
+
+export type ExpenseFilters = {
+  category?: string;
+  startDate?: string;
+  endDate?: string;
+  page?: number;
+  limit?: number;
+};
+
 type ExpensesContextType = {
-	expenses: Expense[];
-	loading: boolean;
-	error: string | null;
-	addExpense: (
-		expense: Omit<Expense, "id" | "createdAt" | "updatedAt">
-	) => Promise<Expense>;
-	updateExpense: (id: string, expense: Partial<Expense>) => Promise<Expense>;
-	deleteExpense: (id: string) => Promise<void>;
-	fetchExpenses: (force?: boolean) => Promise<Expense[] | undefined>;
+  expenses: Expense[];
+  loading: boolean;
+  error: string | null;
+  currentPage: number;
+  totalPages: number;
+  totalItems: number;
+  currentFilters: ExpenseFilters;
+  addExpense: (
+    expense: Omit<Expense, "id" | "createdAt" | "updatedAt">
+  ) => Promise<Expense>;
+  updateExpense: (id: string, expense: Partial<Expense>) => Promise<Expense>;
+  deleteExpense: (id: string) => Promise<void>;
+  fetchExpenses: (filters?: ExpenseFilters, force?: boolean) => Promise<{ data: Expense[]; pagination?: any } | undefined>;
+  setFilters: (filters: ExpenseFilters) => void;
+  resetFilters: () => void;
 };
 
 const ExpensesContext = createContext<ExpensesContextType | undefined>(
 	undefined
 );
 
-// Module-level variable to track last fetch time
-let lastFetchTime = 0;
-const CACHE_DURATION = 30000; // 30 seconds
+// Removed unused lastFetchTime variable
 
 export const ExpensesProvider = ({
-	children,
+  children,
 }: {
-	children: React.ReactNode;
+  children: React.ReactNode;
 }) => {
-	const [expenses, setExpenses] = useState<Expense[]>([]);
+  const [expenses, setExpenses] = useState<Expense[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
+  const [totalItems, setTotalItems] = useState(0);
+  const [currentFilters, setCurrentFilters] = useState<ExpenseFilters>({
+    page: 1,
+    limit: 10,
+  });
   const isMounted = useRef(true);
   const isFetching = useRef(false);
+  const lastFetchKey = useRef<string>('');
 
   // Cleanup on unmount
   useEffect(() => {
@@ -42,88 +85,226 @@ export const ExpensesProvider = ({
     };
   }, []);
 
-  // Helper function to process different response formats
-  const processExpensesResponse = useCallback((data: any): Expense[] => {
-    if (data?.data?.expenses) return data.data.expenses;
-    if (Array.isArray(data?.expenses)) return data.expenses;
-    if (Array.isArray(data?.data)) return data.data;
-    if (Array.isArray(data)) return data;
-    console.warn('Unexpected response format:', data);
-    return [];
+  // Helper function to process different response formats and extract expenses with pagination
+  const processExpensesResponse = useCallback((data: any): { expenses: Expense[], pagination?: any } => {
+    // If response follows the standard format with data.expenses and data.pagination
+    if (data?.data?.expenses) {
+      return {
+        expenses: data.data.expenses,
+        pagination: data.data.pagination
+      };
+    }
+    
+    // If response has expenses array directly
+    if (Array.isArray(data?.expenses)) {
+      return {
+        expenses: data.expenses,
+        pagination: data.pagination || {
+          page: 1,
+          limit: data.expenses.length,
+          total: data.expenses.length,
+          totalPages: 1
+        }
+      };
+    }
+    
+    // Fallback for array responses
+    const expenses = Array.isArray(data) ? data : [];
+    return {
+      expenses,
+      pagination: {
+        page: 1,
+        limit: expenses.length,
+        total: expenses.length,
+        totalPages: 1
+      }
+    };
   }, []);
 
-  const fetchExpenses = useCallback(async (force = false) => {
-    const now = Date.now();
-    const timeSinceLastFetch = now - lastFetchTime;
-    const dataIsFresh = timeSinceLastFetch < CACHE_DURATION;
-    
-    console.log(`[${new Date().toISOString()}] Fetch check - ` +
-      `Last fetch: ${timeSinceLastFetch}ms ago, ` +
-      `Force: ${force}, ` +
-      `Has data: ${expenses.length > 0}, ` +
-      `Is fetching: ${isFetching.current}`);
+  // Create a debounced version of the fetch function with simplified deduplication
+  const debouncedFetchExpenses = useMemo(
+    () => 
+      debounce(async (filters: ExpenseFilters = {}, force = false) => {
+        const mergedFilters = { ...currentFilters, ...filters };
+        const fetchKey = JSON.stringify(mergedFilters);
+        
+        // Only skip if it's the exact same request and we're already processing it
+        if (isFetching.current && lastFetchKey.current === fetchKey && !force) {
+          console.log('⏭️  Skipping duplicate request');
+          return;
+        }
 
-    // Skip if already fetching and not forced
-    if (isFetching.current && !force) {
-      console.log('⏭️  Skipping fetch - already in progress');
+        console.log('🔄 Fetching expenses with filters:', mergedFilters);
+        setLoading(true);
+        setError(null);
+        isFetching.current = true;
+        lastFetchKey.current = fetchKey;
+
+        try {
+          const { page = 1, limit = 10, ...filterParams } = mergedFilters;
+          const queryParams = new URLSearchParams({
+            ...filterParams,
+            page: page.toString(),
+            limit: limit.toString(),
+          });
+
+          const token = await SecureStore.getItemAsync("userToken");
+          if (!token) {
+            throw new Error("No authentication token found");
+          }
+
+          const response = await api.get(`/expenses?${queryParams.toString()}`, {
+            headers: { 
+              Authorization: `Bearer ${token}`,
+              'Cache-Control': 'no-cache',
+              'Pragma': 'no-cache'
+            },
+          });
+          
+          const { expenses: expensesData, pagination } = processExpensesResponse(response.data);
+          
+          if (!isMounted.current) return { data: expensesData, pagination };
+          
+          console.log('✅ Received expenses:', {
+            count: expensesData.length,
+            page: pagination?.page,
+            total: pagination?.total
+          });
+          
+          setExpenses(prevExpenses => 
+            page > 1 ? [...prevExpenses, ...expensesData] : expensesData
+          );
+          
+          if (pagination) {
+            setCurrentPage(pagination.page || page);
+            setTotalPages(pagination.totalPages || 1);
+            setTotalItems(pagination.total || expensesData.length);
+          }
+          
+          // Update the last fetch key after successful update
+          lastFetchKey.current = fetchKey;
+          setCurrentFilters(mergedFilters);
+          
+          return { data: expensesData, pagination };
+        } catch (error) {
+          console.error('Error fetching expenses:', error);
+          if (isMounted.current) {
+            setError(error instanceof Error ? error.message : 'Failed to fetch expenses');
+          }
+          throw error;
+        } finally {
+          if (isMounted.current) {
+            setLoading(false);
+            isFetching.current = false;
+          }
+        }
+      }, 300), // 300ms debounce time
+    [currentFilters, isMounted, processExpensesResponse]
+  );
+
+  // Use the debounced version as the main fetch function
+  const fetchExpenses = useCallback(async (
+    filters: ExpenseFilters = {}, 
+    force = false
+  ): Promise<{ data: Expense[]; pagination?: any } | undefined> => {
+    if (!isMounted.current) return;
+    
+    // Create a stable filters object with defaults
+    const stableFilters = {
+      page: 1,
+      limit: 10,
+      ...filters
+    };
+    
+    const fetchKey = JSON.stringify(stableFilters);
+    
+    // Skip if already fetching with the same filters and not forced
+    if ((isFetching.current && !force) || (lastFetchKey.current === fetchKey && !force)) {
+      console.log('⏭️  Skipping fetch - already in progress or same filters');
       return;
     }
-
-    // Use cached data if available and fresh
-    if (!force && dataIsFresh && expenses.length > 0) {
-      console.log(`✅ Using cached expenses (${expenses.length} items, ${timeSinceLastFetch}ms old)`);
-      return expenses;
-    }
     
-    // Don't fetch too frequently
-    if (timeSinceLastFetch < 1000 && !force) { // 1 second debounce
-      console.log('⏳ Debouncing rapid requests');
-      return;
-    }
+    isFetching.current = true;
+    lastFetchKey.current = fetchKey;
     
     try {
-      isFetching.current = true;
-      const shouldUpdateLoading = !loading;
-      if (shouldUpdateLoading) setLoading(true);
+      setLoading(true);
       setError(null);
       
-      console.log(`📡 ${force ? '[FORCE] ' : ''}Fetching expenses...`);
+      const result = await debouncedFetchExpenses(stableFilters, force);
       
-      const token = await SecureStore.getItemAsync("userToken");
-      if (!token) {
-        throw new Error('No authentication token found');
+      if (isMounted.current && result) {
+        const { data: expensesData, pagination } = result;
+        const page = stableFilters.page;
+        
+        // Only update state if the data has changed
+        setExpenses(prevExpenses => {
+          const newExpenses = page > 1 ? [...prevExpenses, ...expensesData] : expensesData;
+          // Check if the data has actually changed
+          if (JSON.stringify(prevExpenses) === JSON.stringify(newExpenses)) {
+            return prevExpenses;
+          }
+          return newExpenses;
+        });
+        
+        if (pagination) {
+          setCurrentPage(prev => pagination.page === prev ? prev : pagination.page);
+          setTotalPages(prev => pagination.totalPages === prev ? prev : pagination.totalPages);
+          setTotalItems(prev => pagination.total === prev ? prev : pagination.total);
+        }
+        
+        // Only update filters if they've actually changed
+        setCurrentFilters(prev => {
+          return JSON.stringify(prev) === JSON.stringify(stableFilters) 
+            ? prev 
+            : { ...stableFilters };
+        });
       }
-
-      const startTime = Date.now();
-      const response = await api.get("/expenses");
-      const endTime = Date.now();
       
-      const expensesData = processExpensesResponse(response.data);
-      const fetchDuration = endTime - startTime;
-      
-      console.log(`✅ Fetched ${expensesData.length} expenses in ${fetchDuration}ms`);
-      
+      return result;
+    } catch (error) {
+      console.error('❌ Error in fetchExpenses:', error);
       if (isMounted.current) {
-        lastFetchTime = endTime; // Update with the actual response time
-        setExpenses(expensesData);
-        console.log(`🔄 Updated lastFetchTime to: ${new Date(lastFetchTime).toISOString()}`);
+        setError(error instanceof Error ? error.message : 'Failed to fetch expenses');
       }
-      
-      return expensesData;
-    } catch (error: any) {
-      console.error("Error fetching expenses:", error);
-      
-      if (isMounted.current) {
-        setError(error.message || 'Failed to fetch expenses');
-      }
-      throw error; // Re-throw to allow error handling in components
+      throw error;
     } finally {
-      isFetching.current = false;
       if (isMounted.current) {
         setLoading(false);
       }
     }
-  }, [loading, processExpensesResponse, expenses]);
+  }, [debouncedFetchExpenses]);
+  
+  // Update filters and refetch
+  const setFilters = useCallback((filters: ExpenseFilters) => {
+    setCurrentFilters(prev => {
+      // Check if filters have actually changed
+      const hasChanged = Object.entries(filters).some(([key, value]) => 
+        prev[key as keyof ExpenseFilters] !== value
+      );
+      
+      // Only update if something actually changed
+      if (!hasChanged) return prev;
+      
+      return {
+        ...prev,
+        ...filters,
+        page: 1, // Reset to first page when filters change
+      };
+    });
+    fetchExpenses({
+      ...currentFilters,
+      ...filters,
+      page: 1,
+    }, true);
+  }, [currentFilters, fetchExpenses]);
+  
+  // Reset all filters
+  const resetFilters = useCallback(() => {
+    const defaultFilters = { page: 1, limit: 10 };
+    setCurrentFilters(defaultFilters);
+    fetchExpenses(defaultFilters, true);
+  }, [fetchExpenses]);
 
   const addExpense = useCallback(async (
 		expense: Omit<Expense, "id" | "createdAt" | "updatedAt">
@@ -243,11 +424,31 @@ export const ExpensesProvider = ({
     expenses,
     loading,
     error,
-    fetchExpenses,
+    currentPage,
+    totalPages,
+    totalItems,
+    currentFilters,
     addExpense,
     updateExpense,
     deleteExpense,
-  }), [expenses, loading, error, fetchExpenses, addExpense, updateExpense, deleteExpense]);
+    fetchExpenses,
+    setFilters,
+    resetFilters,
+  }), [
+    expenses,
+    loading,
+    error,
+    currentPage,
+    totalPages,
+    totalItems,
+    currentFilters,
+    addExpense,
+    updateExpense,
+    deleteExpense,
+    fetchExpenses,
+    setFilters,
+    resetFilters,
+  ]);
 
   return (
     <ExpensesContext.Provider value={contextValue}>

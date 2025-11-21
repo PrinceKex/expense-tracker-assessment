@@ -1,33 +1,60 @@
 // app/(app)/expenses/index.tsx
-import { AntDesign } from "@expo/vector-icons";
+import { AntDesign, MaterialIcons } from "@expo/vector-icons";
+import DateTimePicker from '@react-native-community/datetimepicker';
 import { useFocusEffect } from "@react-navigation/native";
-import { format } from "date-fns";
+import { format, subMonths } from "date-fns";
 import { Link, router } from "expo-router";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   FlatList,
+  Modal,
+  Platform,
   RefreshControl,
   StyleSheet,
   Text,
   TouchableOpacity,
-  View,
+  View
 } from "react-native";
-import { useExpenses } from "../../contexts/ExpensesContext";
+import { ExpenseFilters, useExpenses } from "../../contexts/ExpensesContext";
 import { Expense } from "../../types/expense";
+
+// Mock categories - replace with your actual categories
+const CATEGORIES = [
+  'Food', 'Transportation', 'Housing', 'Entertainment', 
+  'Utilities', 'Shopping', 'Healthcare', 'Other'
+];
 
 export default function ExpensesScreen() {
   const { 
     expenses, 
     loading, 
-    error: _, // Explicitly mark as unused with _
     fetchExpenses, 
-    deleteExpense 
+    currentFilters, 
+    setFilters, 
+    resetFilters,
+    currentPage,
+    totalPages,
+    deleteExpense
   } = useExpenses();
   
   const [refreshing, setRefreshing] = useState(false);
+  const [showFilters, setShowFilters] = useState(false);
+  const [localFilters, setLocalFilters] = useState<ExpenseFilters>({
+    ...currentFilters,
+    startDate: currentFilters.startDate || format(subMonths(new Date(), 1), 'yyyy-MM-dd'),
+    endDate: currentFilters.endDate || format(new Date(), 'yyyy-MM-dd')
+  });
+  const [showStartDatePicker, setShowStartDatePicker] = useState(false);
+  const [showEndDatePicker, setShowEndDatePicker] = useState(false);
+  
   const initialLoadRef = useRef(false);
   const isFetchingRef = useRef(false);
+  const listRef = useRef<FlatList>(null);
+
+  // Memoize the current filters to prevent unnecessary re-renders
+  const currentFiltersRef = useRef(currentFilters);
+  currentFiltersRef.current = currentFilters;
 
   // Handle pull-to-refresh with debouncing
   const onRefresh = useCallback(async () => {
@@ -41,201 +68,555 @@ export default function ExpensesScreen() {
     isFetchingRef.current = true;
     
     try {
-      await fetchExpenses(true); // Force refresh
+      // Reset to first page on refresh
+      await fetchExpenses({ ...currentFiltersRef.current, page: 1 }, true);
       console.log('✅ Refresh completed successfully');
     } catch (error) {
       console.error("❌ Error refreshing expenses:", error);
-      // Consider showing an error toast to the user here
     } finally {
-      isFetchingRef.current = false;
-      setRefreshing(false);
+      if (isFetchingRef.current) {
+        isFetchingRef.current = false;
+        setRefreshing(false);
+      }
     }
-  }, [fetchExpenses, refreshing]); // Added refreshing back to deps to fix lint
+  }, [fetchExpenses, refreshing]);
 
-  // Memoize the fetchExpenses function to prevent recreation
-  const memoizedFetchExpenses = useCallback(() => {
-    return fetchExpenses();
+  // Initial load
+  useEffect(() => {
+    const loadInitialData = async () => {
+      if (!initialLoadRef.current) {
+        initialLoadRef.current = true;
+        try {
+          await fetchExpenses({ page: 1, limit: 10 });
+        } catch (error) {
+          console.error('Failed to load initial data:', error);
+        }
+      }
+    };
+    
+    loadInitialData();
+    
+    return () => {
+      // Cleanup if needed
+    };
   }, [fetchExpenses]);
 
-  // Handle initial load and focus events with debouncing
+  // Handle focus events with debouncing and cooldown
+  const lastFocusTime = useRef(0);
+  const FOCUS_COOLDOWN = 5000; // 5 seconds cooldown
+  
   useFocusEffect(
     useCallback(() => {
-      let isActive = true;
-      let timeoutId: ReturnType<typeof setTimeout>;
+      const now = Date.now();
       
-      const loadExpenses = async () => {
-        // Prevent multiple simultaneous fetches
-        if (isFetchingRef.current) {
-          console.log('⏭️  Fetch already in progress, skipping');
-          return;
-        }
+      // Only refresh if it's been more than FOCUS_COOLDOWN ms since last refresh
+      if (now - lastFocusTime.current > FOCUS_COOLDOWN) {
+        lastFocusTime.current = now;
+        console.log('🔄 Refreshing on focus');
         
-        // Only fetch if we haven't loaded before or if we have no data
-        const shouldFetch = !initialLoadRef.current || expenses.length === 0;
+        // Use a small delay to allow the UI to settle
+        const timeoutId = setTimeout(() => {
+          fetchExpenses(currentFiltersRef.current, true).catch(error => {
+            console.error('❌ Error refreshing on focus:', error);
+          });
+        }, 300);
         
-        if (shouldFetch) {
-          isFetchingRef.current = true;
-          try {
-            console.log('🔍 Loading expenses...');
-            await memoizedFetchExpenses();
-            if (isActive) {
-              initialLoadRef.current = true;
-              console.log('✅ Initial load completed');
-            }
-          } catch (error) {
-            console.error('❌ Error loading expenses:', error);
-          } finally {
-            isFetchingRef.current = false;
-          }
-        } else {
-          console.log('ℹ️  Using cached data, no fetch needed');
-        }
-      };
-
-      // Add a small delay to batch rapid focus events
-      timeoutId = setTimeout(() => {
-        void loadExpenses();
-      }, 100); // 100ms debounce
+        return () => clearTimeout(timeoutId);
+      }
       
-      return () => {
-        isActive = false;
-        clearTimeout(timeoutId);
-      };
-    }, [expenses.length, memoizedFetchExpenses]) // Include memoized function in deps
+      return undefined;
+    }, [fetchExpenses])
   );
 
-	const renderExpenseItem = ({ item }: { item: Expense }) => (
-  <View style={styles.expenseItem}>
-    <View style={styles.expenseInfo}>
-      <View style={styles.amountContainer}>
-        <Text style={styles.amount}>
-          ${parseFloat(item.amount.toString()).toFixed(2)}
-        </Text>
-        <Text style={styles.category}>{item.category}</Text>
+  // Handle infinite scroll and pagination
+  const handleLoadMore = useCallback(() => {
+    const hasMore = currentPage < totalPages;
+    if (loading || !hasMore) return;
+    
+    const nextPage = currentPage + 1;
+    fetchExpenses({ ...currentFiltersRef.current, page: nextPage });
+  }, [loading, currentPage, totalPages, fetchExpenses]);
+  
+  // Filter changes are handled directly in applyFilters
+  // Apply filters
+  const applyFilters = () => {
+    setFilters(localFilters);
+    setShowFilters(false);
+  };
+  
+  // Reset all filters
+  const resetAllFilters = () => {
+    resetFilters();
+    setLocalFilters({
+      page: 1,
+      limit: 10,
+      startDate: format(subMonths(new Date(), 1), 'yyyy-MM-dd'),
+      endDate: format(new Date(), 'yyyy-MM-dd')
+    });
+  };
+  
+  // Render loading footer for pagination
+  const renderFooter = () => {
+    if (!loading) return null;
+    return (
+      <View style={styles.footer}>
+        <ActivityIndicator size="small" color="#0000ff" />
       </View>
-      {item.description ? (
-        <Text style={styles.description} numberOfLines={2}>
-          {item.description}
-        </Text>
-      ) : null}
-      <Text style={styles.date}>
-        {format(new Date(item.date), "MMM dd, yyyy")}
-      </Text>
-    </View>
-    <View style={styles.actions}>
-      <TouchableOpacity 
-        onPress={() => router.push(`/expenses/edit-expense?id=${item.id}`)}
-        style={styles.editButton}
-      >
-        <AntDesign name="edit" size={20} color="#007AFF" />
-      </TouchableOpacity>
-      <TouchableOpacity 
-        onPress={() => deleteExpense(item.id)}
-        style={styles.deleteButton}
-      >
-        <AntDesign name="delete" size={20} color="#ff3b30" />
-      </TouchableOpacity>
-    </View>
-  </View>
-);
+    );
+  };
+  
+  // Render filter modal
+  const renderFilterModal = () => (
+    <Modal
+      animationType="slide"
+      transparent={true}
+      visible={showFilters}
+      onRequestClose={() => setShowFilters(false)}
+    >
+      <View style={styles.modalOverlay}>
+        <View style={styles.modalContent}>
+          <Text style={styles.modalTitle}>Filter Expenses</Text>
+          
+          <Text style={styles.filterLabel}>Category</Text>
+          <View style={styles.categoryContainer}>
+            {CATEGORIES.map(category => (
+              <TouchableOpacity
+                key={category}
+                style={[
+                  styles.categoryPill,
+                  localFilters.category === category && styles.selectedCategory
+                ]}
+                onPress={() => setLocalFilters(prev => ({
+                  ...prev,
+                  category: prev.category === category ? undefined : category
+                }))}
+              >
+                <Text style={[
+                  styles.categoryText,
+                  localFilters.category === category && styles.selectedCategoryText
+                ]}>
+                  {category}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+          
+          <Text style={styles.filterLabel}>Date Range</Text>
+          <View style={styles.dateRangeContainer}>
+            <TouchableOpacity 
+              style={styles.dateButton}
+              onPress={() => setShowStartDatePicker(true)}
+            >
+              <Text>{localFilters.startDate || 'Start Date'}</Text>
+              <MaterialIcons name="date-range" size={20} color="#666" />
+            </TouchableOpacity>
+            
+            <Text style={styles.dateSeparator}>to</Text>
+            
+            <TouchableOpacity 
+              style={styles.dateButton}
+              onPress={() => setShowEndDatePicker(true)}
+            >
+              <Text>{localFilters.endDate || 'End Date'}</Text>
+              <MaterialIcons name="date-range" size={20} color="#666" />
+            </TouchableOpacity>
+          </View>
+          
+          {(showStartDatePicker || showEndDatePicker) && (
+            <DateTimePicker
+              value={new Date(showStartDatePicker ? localFilters.startDate || new Date() : localFilters.endDate || new Date())}
+              mode="date"
+              display={Platform.OS === 'ios' ? 'spinner' : 'default'}
+              onChange={(event, date) => {
+                const selectedDate = date || new Date();
+                const formattedDate = format(selectedDate, 'yyyy-MM-dd');
+                
+                if (showStartDatePicker) {
+                  setLocalFilters(prev => ({
+                    ...prev,
+                    startDate: formattedDate
+                  }));
+                  setShowStartDatePicker(false);
+                } else {
+                  setLocalFilters(prev => ({
+                    ...prev,
+                    endDate: formattedDate
+                  }));
+                  setShowEndDatePicker(false);
+                }
+              }}
+            />
+          )}
+          
+          <View style={styles.modalButtons}>
+            <TouchableOpacity 
+              style={[styles.button, styles.resetButton]} 
+              onPress={resetAllFilters}
+            >
+              <Text style={styles.resetButtonText}>Reset</Text>
+            </TouchableOpacity>
+            
+            <TouchableOpacity 
+              style={[styles.button, styles.applyButton]} 
+              onPress={applyFilters}
+            >
+              <Text style={styles.applyButtonText}>Apply Filters</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
 
-	if (loading && !refreshing) {
-		return (
-			<View style={styles.centered}>
-				<ActivityIndicator size="large" />
-			</View>
-		);
-	}
+  const renderExpenseItem = ({ item }: { item: Expense }) => (
+    <View style={styles.expenseItem}>
+      <View style={styles.expenseItemContent}>
+        <View style={styles.expenseHeader}>
+          <Text style={styles.expenseTitle} numberOfLines={1} ellipsizeMode="tail">
+            {item.description}
+          </Text>
+          <Text style={styles.expenseAmount}>${item.amount.toFixed(2)}</Text>
+        </View>
+        <View style={styles.expenseMeta}>
+          <Text style={styles.expenseCategory}>{item.category}</Text>
+          <Text style={styles.expenseDate}>
+            {format(new Date(item.date), 'MMM d, yyyy')}
+          </Text>
+        </View>
+      </View>
+      <View style={styles.expenseActions}>
+        <TouchableOpacity
+          onPress={() => router.push(`/expenses/edit-expense?id=${item.id}`)}
+          style={styles.editButton}
+        >
+          <AntDesign name="edit" size={20} color="#007AFF" />
+        </TouchableOpacity>
+        <TouchableOpacity
+          onPress={() => deleteExpense(item.id)}
+          style={styles.deleteButton}
+        >
+          <AntDesign name="delete" size={20} color="#FF3B30" />
+        </TouchableOpacity>
+      </View>
+    </View>
+  );
 
-	return (
-		<View style={styles.container}>
-			<FlatList
-				data={expenses}
-				renderItem={renderExpenseItem}
-				keyExtractor={(item) => item.id}
-				refreshControl={
-					<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
-				}
-				ListEmptyComponent={
-					<View style={styles.emptyContainer}>
-						<Text style={styles.emptyText}>No expenses yet</Text>
-						<Link href="/(app)/add-expense" asChild>
-							<Text style={styles.addExpenseLink}>Add your first expense</Text>
-						</Link>
-					</View>
-				}
-			/>
-			<Link href="/(app)/add-expense" style={styles.addButton} asChild>
-				<AntDesign name="plus-circle" size={56} color="#007AFF" />
-			</Link>
-		</View>
-	);
+  if (loading && !refreshing) {
+    return (
+      <View style={styles.loadingContainer}>
+        <ActivityIndicator size="large" color="#007AFF" />
+      </View>
+    );
+  }
+
+  return (
+    <View style={styles.container}>
+      {/* Header with title and filter button */}
+      <View style={styles.header}>
+        <Text style={styles.title}>Expenses</Text>
+        <TouchableOpacity 
+          style={styles.filterButton}
+          onPress={() => setShowFilters(true)}
+        >
+          <MaterialIcons name="filter-list" size={24} color="#007AFF" />
+          <Text style={styles.filterButtonText}>
+            {Object.values(currentFilters).filter(Boolean).length > 2 ? 'Filters *' : 'Filters'}
+          </Text>
+        </TouchableOpacity>
+      </View>
+      
+      {/* Filter summary */}
+      {(currentFilters.category || currentFilters.startDate || currentFilters.endDate) && (
+        <View style={styles.filterSummary}>
+          <Text style={styles.filterSummaryText}>
+            {[
+              currentFilters.category && `Category: ${currentFilters.category}`,
+              currentFilters.startDate && `From: ${format(new Date(currentFilters.startDate), 'MMM d, yyyy')}`,
+              currentFilters.endDate && `To: ${format(new Date(currentFilters.endDate), 'MMM d, yyyy')}`
+            ].filter(Boolean).join(' • ')}
+          </Text>
+          <TouchableOpacity onPress={resetAllFilters}>
+            <Text style={styles.clearFiltersText}>Clear</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+      
+      {/* Expenses list */}
+      <View style={{ flex: 1 }}>
+        <FlatList
+          ref={listRef}
+          data={expenses}
+          keyExtractor={(item) => item.id}
+          renderItem={renderExpenseItem}
+          refreshControl={
+            <RefreshControl 
+              refreshing={refreshing} 
+              onRefresh={onRefresh} 
+              colors={['#007AFF']}
+              tintColor="#007AFF"
+            />
+          }
+          onEndReached={handleLoadMore}
+          onEndReachedThreshold={0.5}
+          ListFooterComponent={renderFooter}
+          ListEmptyComponent={
+            !loading ? (
+              <View style={styles.emptyContainer}>
+                <MaterialIcons name="search-off" size={64} color="#DDD" style={styles.emptyIcon} />
+                <Text style={styles.emptyText}>
+                  {Object.values(currentFilters).filter(Boolean).length > 2 
+                    ? 'No expenses match your filters'
+                    : 'No expenses found'}
+                </Text>
+                <Text style={styles.emptySubtext}>
+                  {Object.values(currentFilters).filter(Boolean).length > 2 
+                    ? 'Try adjusting your filters or clear them to see all expenses.' 
+                    : 'Add your first expense by tapping the + button'}
+                </Text>
+                
+                {Object.values(currentFilters).filter(Boolean).length > 2 && (
+                  <TouchableOpacity 
+                    style={styles.clearFiltersButton}
+                    onPress={resetAllFilters}
+                  >
+                    <Text style={styles.clearFiltersButtonText}>Clear All Filters</Text>
+                  </TouchableOpacity>
+                )}
+                
+                {expenses.length === 0 && Object.values(currentFilters).filter(Boolean).length <= 2 && (
+                  <TouchableOpacity 
+                    style={styles.addFirstButton}
+                    onPress={() => router.push('/(app)/add-expense')}
+                  >
+                    <AntDesign name="plus" size={20} color="#007AFF" />
+                    <Text style={styles.addFirstButtonText}>Add Your First Expense</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            ) : null
+          }
+        />
+      </View>
+      
+      {/* Add expense button */}
+      <Link href="/(app)/add-expense" asChild>
+        <TouchableOpacity style={styles.addButton}>
+          <AntDesign name="plus" size={24} color="white" />
+        </TouchableOpacity>
+      </Link>
+      
+      {/* Filter modal */}
+      {renderFilterModal()}
+    </View>
+  );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: "#f5f5f5",
-    padding: 10,
   },
-  centered: {
+  header: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: 16,
+    backgroundColor: '#fff',
+    borderBottomWidth: 1,
+    borderBottomColor: '#e1e1e1',
+  },
+  title: {
+    fontSize: 24,
+    fontWeight: 'bold',
+    color: '#1a1a1a',
+  },
+  filterButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 8,
+    borderRadius: 8,
+    backgroundColor: '#f0f7ff',
+  },
+  filterButtonText: {
+    marginLeft: 4,
+    color: '#007AFF',
+    fontWeight: '500',
+  },
+  filterSummary: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: 12,
+    backgroundColor: '#f8f9fa',
+    borderBottomWidth: 1,
+    borderBottomColor: '#e1e1e1',
+  },
+  filterSummaryText: {
+    fontSize: 12,
+    color: '#666',
     flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
+  },
+  clearFiltersText: {
+    color: '#007AFF',
+    fontSize: 12,
+    marginLeft: 8,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'flex-end',
+  },
+  modalContent: {
+    backgroundColor: 'white',
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
+    padding: 20,
+    maxHeight: '80%',
+  },
+  modalTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    marginBottom: 20,
+    textAlign: 'center',
+  },
+  filterLabel: {
+    fontSize: 16,
+    fontWeight: '600',
+    marginTop: 16,
+    marginBottom: 8,
+    color: '#333',
+  },
+  categoryContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    marginBottom: 8,
+  },
+  categoryPill: {
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 16,
+    backgroundColor: '#f0f0f0',
+    marginRight: 8,
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: '#e0e0e0',
+  },
+  selectedCategory: {
+    backgroundColor: '#007AFF',
+    borderColor: '#007AFF',
+  },
+  categoryText: {
+    fontSize: 14,
+    color: '#333',
+  },
+  selectedCategoryText: {
+    color: 'white',
+    fontWeight: '500',
+  },
+  dateRangeContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  dateButton: {
+    flex: 1,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: 12,
+    borderWidth: 1,
+    borderColor: '#ddd',
+    borderRadius: 8,
+    backgroundColor: '#f9f9f9',
+  },
+  dateSeparator: {
+    marginHorizontal: 8,
+    color: '#666',
+  },
+  modalButtons: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 24,
+  },
+  button: {
+    flex: 1,
+    padding: 12,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  resetButton: {
+    backgroundColor: '#f0f0f0',
+    marginRight: 8,
+  },
+  applyButton: {
+    backgroundColor: '#007AFF',
+    marginLeft: 8,
+  },
+  resetButtonText: {
+    color: '#333',
+    fontWeight: '600',
+  },
+  applyButtonText: {
+    color: 'white',
+    fontWeight: '600',
+  },
+  footer: {
+    padding: 16,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   expenseItem: {
-    backgroundColor: "#fff",
-    padding: 15,
-    marginBottom: 10,
-    borderRadius: 10,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 3,
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
+    padding: 16,
+    backgroundColor: "#fff",
+    borderBottomWidth: 1,
+    borderBottomColor: "#f0f0f0",
   },
-  expenseInfo: {
+  expenseItemContent: {
     flex: 1,
-    marginRight: 10,
+    marginRight: 12,
   },
-  amountContainer: {
+  expenseHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     marginBottom: 4,
   },
-  amount: {
-    fontSize: 18,
-    fontWeight: "bold",
-    color: "#333",
+  expenseMeta: {
+    flexDirection: 'row',
+    alignItems: 'center',
   },
-  description: {
+  expenseTitle: {
+    fontSize: 16,
+    fontWeight: "500",
+    flex: 1,
+    marginRight: 12,
+  },
+  expenseAmount: {
+    fontSize: 16,
+    fontWeight: "600",
+    color: "#1a1a1a",
+  },
+  expenseCategory: {
     fontSize: 14,
     color: "#666",
-    marginTop: 4,
-    marginBottom: 4,
-  },
-  category: {
-    fontSize: 14,
-    color: "#888",
-    backgroundColor: "#f0f0f0",
+    marginRight: 12,
+    backgroundColor: '#f0f7ff',
     paddingHorizontal: 8,
     paddingVertical: 2,
     borderRadius: 10,
     overflow: 'hidden',
   },
-  date: {
+  expenseDate: {
     fontSize: 12,
     color: "#999",
-    marginTop: 4,
   },
-  actions: {
+  expenseActions: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginLeft: 10,
   },
   editButton: {
     padding: 8,
@@ -244,11 +625,70 @@ const styles = StyleSheet.create({
   deleteButton: {
     padding: 8,
   },
-  errorText: {
-    color: "#ff3b30",
-    textAlign: "center",
+  loadingContainer: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    backgroundColor: "#f5f5f5",
+  },
+  emptyContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 32,
     marginTop: 20,
+  },
+  emptyIcon: {
+    marginBottom: 16,
+    opacity: 0.7,
+  },
+  emptyText: {
+    fontSize: 20,
+    fontWeight: '600',
+    color: '#333',
+    marginTop: 16,
+    textAlign: 'center',
+    marginBottom: 8,
+  },
+  emptySubtext: {
+    fontSize: 15,
+    color: '#666',
+    marginTop: 8,
+    marginBottom: 20,
+    textAlign: 'center',
+    maxWidth: 300,
+    lineHeight: 22,
+  },
+  clearFiltersButton: {
+    backgroundColor: '#F0F0F0',
     paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: 8,
+    marginTop: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  clearFiltersButtonText: {
+    color: '#007AFF',
+    fontWeight: '600',
+    fontSize: 15,
+  },
+  addFirstButton: {
+    backgroundColor: 'rgba(0, 122, 255, 0.1)',
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: 8,
+    marginTop: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  addFirstButtonText: {
+    color: '#007AFF',
+    fontWeight: '600',
+    fontSize: 15,
+    marginLeft: 8,
   },
   addButton: {
     position: "absolute",
@@ -265,21 +705,5 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.3,
     shadowRadius: 3,
-  },
-  emptyContainer: {
-    flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
-    marginTop: 100,
-  },
-  emptyText: {
-    fontSize: 18,
-    color: "#666",
-    marginBottom: 16,
-  },
-  addExpenseLink: {
-    color: "#007AFF",
-    fontSize: 16,
-    fontWeight: "500",
   },
 });
